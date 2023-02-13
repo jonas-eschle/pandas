@@ -159,8 +159,7 @@ class ArrowDtype(StorageExtensionDtype):
         try:
             pa_dtype = pa.type_for_alias(base_type)
         except ValueError as err:
-            has_parameters = re.search(r"\[.*\]", base_type)
-            if has_parameters:
+            if has_parameters := re.search(r"\[.*\]", base_type):
                 raise NotImplementedError(
                     "Passing pyarrow type specific parameters "
                     f"({has_parameters.group()}) in the string is not supported. "

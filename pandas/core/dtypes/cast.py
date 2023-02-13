@@ -353,14 +353,14 @@ def maybe_downcast_numeric(
         return result
 
     def trans(x):
-        if do_round:
-            return x.round()
-        return x
+        return x.round() if do_round else x
 
-    if dtype.kind == result.dtype.kind:
-        # don't allow upcasts here (except if empty)
-        if result.dtype.itemsize <= dtype.itemsize and result.size:
-            return result
+    if (
+        dtype.kind == result.dtype.kind
+        and result.dtype.itemsize <= dtype.itemsize
+        and result.size
+    ):
+        return result
 
     if is_bool_dtype(dtype) or is_integer_dtype(dtype):
 
@@ -650,11 +650,7 @@ def _maybe_promote(dtype: np.dtype, fill_value=np.nan):
 
     elif issubclass(dtype.type, np.timedelta64):
         inferred, fv = infer_dtype_from_scalar(fill_value, pandas_dtype=True)
-        if inferred == dtype:
-            return dtype, fv
-
-        return np.dtype("object"), fill_value
-
+        return (dtype, fv) if inferred == dtype else (np.dtype("object"), fill_value)
     elif is_float(fill_value):
         if issubclass(dtype.type, np.bool_):
             dtype = np.dtype(np.object_)
@@ -732,11 +728,7 @@ def _ensure_dtype_type(value, dtype: np.dtype):
     """
     # Start with exceptions in which we do _not_ cast to numpy types
 
-    if dtype == _dtype_obj:
-        return value
-
-    # Note: before we get here we have already excluded isna(value)
-    return dtype.type(value)
+    return value if dtype == _dtype_obj else dtype.type(value)
 
 
 def infer_dtype_from(val, pandas_dtype: bool = False) -> tuple[DtypeObj, Any]:
@@ -751,9 +743,11 @@ def infer_dtype_from(val, pandas_dtype: bool = False) -> tuple[DtypeObj, Any]:
         If False, scalar/array belongs to pandas extension types is inferred as
         object
     """
-    if not is_list_like(val):
-        return infer_dtype_from_scalar(val, pandas_dtype=pandas_dtype)
-    return infer_dtype_from_array(val, pandas_dtype=pandas_dtype)
+    return (
+        infer_dtype_from_array(val, pandas_dtype=pandas_dtype)
+        if is_list_like(val)
+        else infer_dtype_from_scalar(val, pandas_dtype=pandas_dtype)
+    )
 
 
 def infer_dtype_from_scalar(val, pandas_dtype: bool = False) -> tuple[DtypeObj, Any]:
@@ -800,12 +794,11 @@ def infer_dtype_from_scalar(val, pandas_dtype: bool = False) -> tuple[DtypeObj, 
             val = val.to_datetime64()
             dtype = val.dtype
             # TODO: test with datetime(2920, 10, 1) based on test_replace_dtypes
+        elif pandas_dtype:
+            dtype = DatetimeTZDtype(unit="ns", tz=val.tz)
         else:
-            if pandas_dtype:
-                dtype = DatetimeTZDtype(unit="ns", tz=val.tz)
-            else:
-                # return datetimetz as object
-                return _dtype_obj, val
+            # return datetimetz as object
+            return _dtype_obj, val
 
     elif isinstance(val, (np.timedelta64, dt.timedelta)):
         try:
@@ -1168,15 +1161,7 @@ def maybe_infer_to_datetimelike(
         convert_datetime=True,
         dtype_if_all_nat=np.dtype("M8[ns]"),
     )
-    if out.dtype.kind in ["i", "u", "f", "b", "c"]:
-        # Here we do not convert numeric dtypes, as if we wanted that,
-        #  numpy would have done it for us.
-        #  See also _maybe_cast_data_without_dtype
-        return value
-    # Incompatible return value type (got "Union[ExtensionArray, ndarray[Any, Any]]",
-    # expected "Union[ndarray[Any, Any], DatetimeArray, TimedeltaArray, PeriodArray,
-    # IntervalArray]")
-    return out  # type: ignore[return-value]
+    return value if out.dtype.kind in ["i", "u", "f", "b", "c"] else out
 
 
 def maybe_cast_to_datetime(
@@ -1201,22 +1186,20 @@ def maybe_cast_to_datetime(
     _ensure_nanosecond_dtype(dtype)
 
     if is_timedelta64_dtype(dtype):
-        res = TimedeltaArray._from_sequence(value, dtype=dtype)
-        return res
-    else:
-        try:
-            dta = DatetimeArray._from_sequence(value, dtype=dtype)
-        except ValueError as err:
-            # We can give a Series-specific exception message.
-            if "cannot supply both a tz and a timezone-naive dtype" in str(err):
-                raise ValueError(
-                    "Cannot convert timezone-aware data to "
-                    "timezone-naive dtype. Use "
-                    "pd.Series(values).dt.tz_localize(None) instead."
-                ) from err
-            raise
+        return TimedeltaArray._from_sequence(value, dtype=dtype)
+    try:
+        dta = DatetimeArray._from_sequence(value, dtype=dtype)
+    except ValueError as err:
+        # We can give a Series-specific exception message.
+        if "cannot supply both a tz and a timezone-naive dtype" in str(err):
+            raise ValueError(
+                "Cannot convert timezone-aware data to "
+                "timezone-naive dtype. Use "
+                "pd.Series(values).dt.tz_localize(None) instead."
+            ) from err
+        raise
 
-        return dta
+    return dta
 
 
 def sanitize_to_nanoseconds(values: np.ndarray, copy: bool = False) -> np.ndarray:
@@ -1316,18 +1299,16 @@ def find_result_type(left: ArrayLike, right: Any) -> DtypeObj:
         if lib.is_float(right) and right.is_integer() and left.dtype.kind != "f":
             right = int(right)
 
-        new_dtype = np.result_type(left, right)
+        return np.result_type(left, right)
 
     elif is_valid_na_for_dtype(right, left.dtype):
         # e.g. IntervalDtype[int] and None/np.nan
-        new_dtype = ensure_dtype_can_hold_na(left.dtype)
+        return ensure_dtype_can_hold_na(left.dtype)
 
     else:
         dtype, _ = infer_dtype_from(right, pandas_dtype=True)
 
-        new_dtype = find_common_type([left.dtype, dtype])
-
-    return new_dtype
+        return find_common_type([left.dtype, dtype])
 
 
 def common_dtype_categorical_compat(

@@ -657,13 +657,16 @@ class DataFrame(NDFrame, OpsMixin):
                 # to avoid the result sharing the same Manager
                 data = data.copy(deep=False)
 
-        if isinstance(data, (BlockManager, ArrayManager)):
-            # first check if a Manager is passed without any other arguments
-            # -> use fastpath (without checking Manager type)
-            if index is None and columns is None and dtype is None and not copy:
-                # GH#33357 fastpath
-                NDFrame.__init__(self, data)
-                return
+        if (
+            isinstance(data, (BlockManager, ArrayManager))
+            and index is None
+            and columns is None
+            and dtype is None
+            and not copy
+        ):
+            # GH#33357 fastpath
+            NDFrame.__init__(self, data)
+            return
 
         manager = get_option("mode.data_manager")
 
@@ -759,14 +762,9 @@ class DataFrame(NDFrame, OpsMixin):
                     typ=manager,
                 )
 
-        # For data is list-like, or Iterable (will consume into list)
         elif is_list_like(data):
             if not isinstance(data, abc.Sequence):
-                if hasattr(data, "__array__"):
-                    # GH#44616 big perf improvement for e.g. pytorch tensor
-                    data = np.asarray(data)
-                else:
-                    data = list(data)
+                data = np.asarray(data) if hasattr(data, "__array__") else list(data)
             if len(data) > 0:
                 if is_dataclass(data[0]):
                     data = dataclasses_to_dicts(data)
@@ -806,7 +804,6 @@ class DataFrame(NDFrame, OpsMixin):
                     dtype=dtype,
                     typ=manager,
                 )
-        # For data is scalar
         else:
             if index is None or columns is None:
                 raise ValueError("DataFrame constructor not properly called!")
@@ -1729,7 +1726,7 @@ class DataFrame(NDFrame, OpsMixin):
         index = None
         orient = orient.lower()
         if orient == "index":
-            if len(data) > 0:
+            if data:
                 # TODO speed up Series case
                 if isinstance(list(data.values())[0], (Series, dict)):
                     data = _from_nested_dict(data)
@@ -1738,7 +1735,7 @@ class DataFrame(NDFrame, OpsMixin):
                     # error: Incompatible types in assignment (expression has type
                     # "List[Any]", variable has type "Dict[Any, Any]")
                     data = list(data.values())  # type: ignore[assignment]
-        elif orient in ("columns", "tight"):
+        elif orient in {"columns", "tight"}:
             if columns is not None:
                 raise ValueError(f"cannot use columns parameter with orient='{orient}'")
         else:  # pragma: no cover
@@ -1749,20 +1746,20 @@ class DataFrame(NDFrame, OpsMixin):
 
         if orient != "tight":
             return cls(data, index=index, columns=columns, dtype=dtype)
-        else:
-            realdata = data["data"]
+        realdata = data["data"]
 
-            def create_index(indexlist, namelist):
-                index: Index
-                if len(namelist) > 1:
-                    index = MultiIndex.from_tuples(indexlist, names=namelist)
-                else:
-                    index = Index(indexlist, name=namelist[0])
-                return index
+        def create_index(indexlist, namelist):
+            index: Index
+            index = (
+                MultiIndex.from_tuples(indexlist, names=namelist)
+                if len(namelist) > 1
+                else Index(indexlist, name=namelist[0])
+            )
+            return index
 
-            index = create_index(data["index"], data["index_names"])
-            columns = create_index(data["columns"], data["column_names"])
-            return cls(realdata, index=index, columns=columns, dtype=dtype)
+        index = create_index(data["index"], data["index_names"])
+        columns = create_index(data["columns"], data["column_names"])
+        return cls(realdata, index=index, columns=columns, dtype=dtype)
 
     def to_numpy(
         self,
@@ -2179,19 +2176,15 @@ class DataFrame(NDFrame, OpsMixin):
             columns = ensure_index(columns)
 
         def maybe_reorder(
-            arrays: list[ArrayLike], arr_columns: Index, columns: Index, index
-        ) -> tuple[list[ArrayLike], Index, Index | None]:
+                arrays: list[ArrayLike], arr_columns: Index, columns: Index, index
+            ) -> tuple[list[ArrayLike], Index, Index | None]:
             """
             If our desired 'columns' do not match the data's pre-existing 'arr_columns',
             we re-order our arrays.  This is like a pre-emptive (cheap) reindex.
             """
-            if len(arrays):
-                length = len(arrays[0])
-            else:
-                length = 0
-
+            length = len(arrays[0]) if len(arrays) else 0
             result_index = None
-            if len(arrays) == 0 and index is None and length == 0:
+            if not arrays and index is None and length == 0:
                 result_index = default_index(0)
 
             arrays, arr_columns = reorder_arrays(arrays, arr_columns, columns, length)
@@ -2217,11 +2210,7 @@ class DataFrame(NDFrame, OpsMixin):
             else:
                 values.extend(itertools.islice(data, nrows - 1))
 
-            if dtype is not None:
-                data = np.array(values, dtype=dtype)
-            else:
-                data = values
-
+            data = np.array(values, dtype=dtype) if dtype is not None else values
         if isinstance(data, dict):
             if columns is None:
                 columns = arr_columns = ensure_index(sorted(data))
@@ -2263,11 +2252,7 @@ class DataFrame(NDFrame, OpsMixin):
                     arrays, arr_columns, columns, index
                 )
 
-        if exclude is None:
-            exclude = set()
-        else:
-            exclude = set(exclude)
-
+        exclude = set() if exclude is None else set(exclude)
         if index is not None:
             if isinstance(index, str) or not hasattr(index, "__iter__"):
                 i = columns.get_loc(index)
@@ -3635,9 +3620,6 @@ class DataFrame(NDFrame, OpsMixin):
                 self
             )
             result._set_is_copy(self, copy=copy)
-            return result
-
-        # icol
         else:
             label = self.columns[i]
 
@@ -3646,7 +3628,8 @@ class DataFrame(NDFrame, OpsMixin):
 
             # this is a cached value, mark it so
             result._set_as_cached(label, self)
-            return result
+
+        return result
 
     def _get_column_array(self, i: int) -> ArrayLike:
         """
@@ -3716,9 +3699,9 @@ class DataFrame(NDFrame, OpsMixin):
                 indexer = lib.maybe_indices_to_slice(
                     indexer.astype(np.intp, copy=False), len(self)
                 )
-                if isinstance(indexer, np.ndarray):
-                    # GH#43223 If we can not convert, use take
-                    return self.take(indexer, axis=0)
+            if isinstance(indexer, np.ndarray):
+                # GH#43223 If we can not convert, use take
+                return self.take(indexer, axis=0)
             return self._slice(indexer, axis=0)
 
         # Do we have a (boolean) DataFrame?
@@ -3750,14 +3733,13 @@ class DataFrame(NDFrame, OpsMixin):
 
         data = self._take_with_is_copy(indexer, axis=1)
 
-        if is_single_key:
-            # What does looking for a single key in a non-unique index return?
-            # The behavior is inconsistent. It returns a Series, except when
-            # - the key itself is repeated (test on data.shape, #9519), or
-            # - we have a MultiIndex on columns (test on self.columns, #21309)
-            if data.shape[1] == 1 and not isinstance(self.columns, MultiIndex):
-                # GH#26490 using data[key] can cause RecursionError
-                return data._get_item_cache(key)
+        if (
+            is_single_key
+            and data.shape[1] == 1
+            and not isinstance(self.columns, MultiIndex)
+        ):
+            # GH#26490 using data[key] can cause RecursionError
+            return data._get_item_cache(key)
 
         return data
 
@@ -3791,41 +3773,40 @@ class DataFrame(NDFrame, OpsMixin):
     def _getitem_multilevel(self, key):
         # self.columns is a MultiIndex
         loc = self.columns.get_loc(key)
-        if isinstance(loc, (slice, np.ndarray)):
-            new_columns = self.columns[loc]
-            result_columns = maybe_droplevels(new_columns, key)
-            if self._is_mixed_type:
-                result = self.reindex(columns=new_columns)
-                result.columns = result_columns
-            else:
-                new_values = self.values[:, loc]
-                result = self._constructor(
-                    new_values, index=self.index, columns=result_columns
-                )
-                result = result.__finalize__(self)
-
-            # If there is only one column being returned, and its name is
-            # either an empty string, or a tuple with an empty string as its
-            # first element, then treat the empty string as a placeholder
-            # and return the column as if the user had provided that empty
-            # string in the key. If the result is a Series, exclude the
-            # implied empty string from its name.
-            if len(result.columns) == 1:
-                top = result.columns[0]
-                if isinstance(top, tuple):
-                    top = top[0]
-                if top == "":
-                    result = result[""]
-                    if isinstance(result, Series):
-                        result = self._constructor_sliced(
-                            result, index=self.index, name=key
-                        )
-
-            result._set_is_copy(self)
-            return result
-        else:
+        if not isinstance(loc, (slice, np.ndarray)):
             # loc is neither a slice nor ndarray, so must be an int
             return self._ixs(loc, axis=1)
+        new_columns = self.columns[loc]
+        result_columns = maybe_droplevels(new_columns, key)
+        if self._is_mixed_type:
+            result = self.reindex(columns=new_columns)
+            result.columns = result_columns
+        else:
+            new_values = self.values[:, loc]
+            result = self._constructor(
+                new_values, index=self.index, columns=result_columns
+            )
+            result = result.__finalize__(self)
+
+        # If there is only one column being returned, and its name is
+        # either an empty string, or a tuple with an empty string as its
+        # first element, then treat the empty string as a placeholder
+        # and return the column as if the user had provided that empty
+        # string in the key. If the result is a Series, exclude the
+        # implied empty string from its name.
+        if len(result.columns) == 1:
+            top = result.columns[0]
+            if isinstance(top, tuple):
+                top = top[0]
+            if top == "":
+                result = result[""]
+                if isinstance(result, Series):
+                    result = self._constructor_sliced(
+                        result, index=self.index, name=key
+                    )
+
+        result._set_is_copy(self)
+        return result
 
     def _get_value(self, index, col, takeable: bool = False) -> Scalar:
         """
@@ -3898,9 +3879,8 @@ class DataFrame(NDFrame, OpsMixin):
         self._iset_item_mgr(loc, arraylike, inplace=False)
 
     def __setitem__(self, key, value):
-        if not PYPY and using_copy_on_write():
-            if sys.getrefcount(self) <= 3:
-                raise ChainedAssignmentError(_chained_assignment_msg)
+        if not PYPY and using_copy_on_write() and sys.getrefcount(self) <= 3:
+            raise ChainedAssignmentError(_chained_assignment_msg)
 
         key = com.apply_if_callable(key, self)
 
@@ -3949,29 +3929,25 @@ class DataFrame(NDFrame, OpsMixin):
                 value = value.reindex(self.index.take(indexer))
             self.iloc[indexer] = value
 
+        elif isinstance(value, DataFrame):
+            check_key_length(self.columns, key, value)
+            for k1, k2 in zip(key, value.columns):
+                self[k1] = value[k2]
+
+        elif not is_list_like(value):
+            for col in key:
+                self[col] = value
+
+        elif isinstance(value, np.ndarray) and value.ndim == 2:
+            self._iset_not_inplace(key, value)
+
+        elif np.ndim(value) > 1:
+            # list of lists
+            value = DataFrame(value).values
+            return self._setitem_array(key, value)
+
         else:
-            # Note: unlike self.iloc[:, indexer] = value, this will
-            #  never try to overwrite values inplace
-
-            if isinstance(value, DataFrame):
-                check_key_length(self.columns, key, value)
-                for k1, k2 in zip(key, value.columns):
-                    self[k1] = value[k2]
-
-            elif not is_list_like(value):
-                for col in key:
-                    self[col] = value
-
-            elif isinstance(value, np.ndarray) and value.ndim == 2:
-                self._iset_not_inplace(key, value)
-
-            elif np.ndim(value) > 1:
-                # list of lists
-                value = DataFrame(value).values
-                return self._setitem_array(key, value)
-
-            else:
-                self._iset_not_inplace(key, value)
+            self._iset_not_inplace(key, value)
 
     def _iset_not_inplace(self, key, value):
         # GH#39510 when setting with df[key] = obj with a list-like key and
@@ -3983,10 +3959,7 @@ class DataFrame(NDFrame, OpsMixin):
         def igetitem(obj, i: int):
             # Note: we catch DataFrame obj before getting here, but
             #  hypothetically would return obj.iloc[:, i]
-            if isinstance(obj, np.ndarray):
-                return obj[..., i]
-            else:
-                return obj[i]
+            return obj[..., i] if isinstance(obj, np.ndarray) else obj[i]
 
         if self.columns.is_unique:
             if np.shape(value)[-1] != len(key):
@@ -4124,12 +4097,10 @@ class DataFrame(NDFrame, OpsMixin):
             key in self.columns
             and value.ndim == 1
             and not is_extension_array_dtype(value)
-        ):
-            # broadcast across multiple columns if necessary
-            if not self.columns.is_unique or isinstance(self.columns, MultiIndex):
-                existing_piece = self[key]
-                if isinstance(existing_piece, DataFrame):
-                    value = np.tile(value, (len(existing_piece.columns), 1)).T
+        ) and (not self.columns.is_unique or isinstance(self.columns, MultiIndex)):
+            existing_piece = self[key]
+            if isinstance(existing_piece, DataFrame):
+                value = np.tile(value, (len(existing_piece.columns), 1)).T
 
         self._set_item_mgr(key, value)
 
@@ -4427,11 +4398,10 @@ class DataFrame(NDFrame, OpsMixin):
             # valid query
             result = self[res]
 
-        if inplace:
-            self._update_inplace(result)
-            return None
-        else:
+        if not inplace:
             return result
+        self._update_inplace(result)
+        return None
 
     @overload
     def eval(self, expr: str, *, inplace: Literal[False] = ..., **kwargs) -> Any:
@@ -4675,15 +4645,10 @@ class DataFrame(NDFrame, OpsMixin):
 
         def predicate(arr: ArrayLike) -> bool:
             dtype = arr.dtype
-            if include:
-                if not dtype_predicate(dtype, include):
-                    return False
+            if include and not dtype_predicate(dtype, include):
+                return False
 
-            if exclude:
-                if dtype_predicate(dtype, exclude):
-                    return False
-
-            return True
+            return not exclude or not dtype_predicate(dtype, exclude)
 
         mgr = self._mgr._get_data_subset(predicate).copy(deep=None)
         return type(self)(mgr).__finalize__(self)
@@ -4929,21 +4894,20 @@ class DataFrame(NDFrame, OpsMixin):
         new_index, row_indexer = self.index.reindex(axes["index"])
         new_columns, col_indexer = self.columns.reindex(axes["columns"])
 
-        if row_indexer is not None and col_indexer is not None:
-            # Fastpath. By doing two 'take's at once we avoid making an
-            #  unnecessary copy.
-            # We only get here with `not self._is_mixed_type`, which (almost)
-            #  ensures that self.values is cheap. It may be worth making this
-            #  condition more specific.
-            indexer = row_indexer, col_indexer
-            new_values = take_2d_multi(self.values, indexer, fill_value=fill_value)
-            return self._constructor(new_values, index=new_index, columns=new_columns)
-        else:
+        if row_indexer is None or col_indexer is None:
             return self._reindex_with_indexers(
                 {0: [new_index, row_indexer], 1: [new_columns, col_indexer]},
                 copy=copy,
                 fill_value=fill_value,
             )
+        # Fastpath. By doing two 'take's at once we avoid making an
+        #  unnecessary copy.
+        # We only get here with `not self._is_mixed_type`, which (almost)
+        #  ensures that self.values is cheap. It may be worth making this
+        #  condition more specific.
+        indexer = row_indexer, col_indexer
+        new_values = take_2d_multi(self.values, indexer, fill_value=fill_value)
+        return self._constructor(new_values, index=new_index, columns=new_columns)
 
     @doc(NDFrame.align, **_shared_doc_kwargs)
     def align(
@@ -5625,14 +5589,14 @@ class DataFrame(NDFrame, OpsMixin):
 
             if periods > 0:
                 result = self.iloc[:, :-periods]
-                for col in range(min(ncols, abs(periods))):
+                for _ in range(min(ncols, abs(periods))):
                     # TODO(EA2D): doing this in a loop unnecessary with 2D EAs
                     # Define filler inside loop so we get a copy
                     filler = self.iloc[:, 0].shift(len(self))
                     result.insert(0, label, filler, allow_duplicates=True)
             else:
                 result = self.iloc[:, -periods:]
-                for col in range(min(ncols, abs(periods))):
+                for _ in range(min(ncols, abs(periods))):
                     # Define filler inside loop so we get a copy
                     filler = self.iloc[:, -1].shift(len(self))
                     result.insert(
@@ -5836,27 +5800,23 @@ class DataFrame(NDFrame, OpsMixin):
         if missing:
             raise KeyError(f"None of {missing} are in the columns")
 
-        if inplace:
-            frame = self
-        else:
-            # GH 49473 Use "lazy copy" with Copy-on-Write
-            frame = self.copy(deep=None)
-
+        frame = self if inplace else self.copy(deep=None)
         arrays = []
         names: list[Hashable] = []
         if append:
             names = list(self.index.names)
             if isinstance(self.index, MultiIndex):
-                for i in range(self.index.nlevels):
-                    arrays.append(self.index._get_level_values(i))
+                arrays.extend(
+                    self.index._get_level_values(i)
+                    for i in range(self.index.nlevels)
+                )
             else:
                 arrays.append(self.index)
 
         to_remove: list[Hashable] = []
         for col in keys:
             if isinstance(col, MultiIndex):
-                for n in range(col.nlevels):
-                    arrays.append(col._get_level_values(n))
+                arrays.extend(col._get_level_values(n) for n in range(col.nlevels))
                 names.extend(col.names)
             elif isinstance(col, (Index, Series)):
                 # if Index then not MultiIndex (treated above)
@@ -5875,7 +5835,6 @@ class DataFrame(NDFrame, OpsMixin):
                 # "List[Any]"; expected "Index"
                 arrays.append(list(col))  # type: ignore[arg-type]
                 names.append(None)
-            # from here, col can only be a column label
             else:
                 arrays.append(frame[col]._values)
                 names.append(col)
@@ -5905,9 +5864,7 @@ class DataFrame(NDFrame, OpsMixin):
 
         frame.index = index
 
-        if not inplace:
-            return frame
-        return None
+        return None if inplace else frame
 
     @overload
     def reset_index(
@@ -6126,10 +6083,7 @@ class DataFrame(NDFrame, OpsMixin):
         """
         inplace = validate_bool_kwarg(inplace, "inplace")
         self._check_inplace_and_allows_duplicate_labels(inplace)
-        if inplace:
-            new_obj = self
-        else:
-            new_obj = self.copy(deep=None)
+        new_obj = self if inplace else self.copy(deep=None)
         if allow_duplicates is not lib.no_default:
             allow_duplicates = validate_bool_kwarg(allow_duplicates, "allow_duplicates")
 
@@ -6192,10 +6146,7 @@ class DataFrame(NDFrame, OpsMixin):
                 )
 
         new_obj.index = new_index
-        if not inplace:
-            return new_obj
-
-        return None
+        return None if inplace else new_obj
 
     # ----------------------------------------------------------------------
     # Reindex-based selection methods
@@ -6399,11 +6350,7 @@ class DataFrame(NDFrame, OpsMixin):
         else:
             raise ValueError(f"invalid how option: {how}")
 
-        if np.all(mask):
-            result = self.copy(deep=None)
-        else:
-            result = self.loc(axis=axis)[mask]
-
+        result = self.copy(deep=None) if np.all(mask) else self.loc(axis=axis)[mask]
         if ignore_index:
             result.index = default_index(len(result))
 
@@ -6505,11 +6452,10 @@ class DataFrame(NDFrame, OpsMixin):
         if ignore_index:
             result.index = default_index(len(result))
 
-        if inplace:
-            self._update_inplace(result)
-            return None
-        else:
+        if not inplace:
             return result
+        self._update_inplace(result)
+        return None
 
     def duplicated(
         self,
@@ -6753,17 +6699,9 @@ class DataFrame(NDFrame, OpsMixin):
                 k, kind=kind, ascending=ascending, na_position=na_position, key=key
             )
         else:
-            if inplace:
-                return self._update_inplace(self)
-            else:
-                return self.copy(deep=None)
-
+            return self._update_inplace(self) if inplace else self.copy(deep=None)
         if is_range_indexer(indexer, len(indexer)):
-            if inplace:
-                return self._update_inplace(self)
-            else:
-                return self.copy(deep=None)
-
+            return self._update_inplace(self) if inplace else self.copy(deep=None)
         new_data = self._mgr.take(
             indexer, axis=self._get_block_manager_axis(axis), verify=False
         )
